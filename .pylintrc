@@ -1,0 +1,9 @@
+[MASTER]
+ignore-patterns=.venv
+
+[MESSAGES CONTROL]
+disable=all
+enable=E,F
+
+[REPORTS]
+score=no

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.cache/
+.pytest_cache/
+.ruff_cache/
+tmp/
+data/stickerhub.db
+data/bindings.json
