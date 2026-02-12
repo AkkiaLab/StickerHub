@@ -1,7 +1,8 @@
 services:
   stickerhub:
-    image: ghcr.io/akkialab/stickerhub:latest
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile
     volumes:
       - ./data:/app/data
     env_file:

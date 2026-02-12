@@ -56,16 +56,30 @@ LOG_LEVEL=INFO
 
 - 飞书需在应用后台开启机器人收发消息权限，并启用长连接事件能力。
 
-## 使用 Docker Compose 部署
+## 使用 Docker Compose 部署（默认拉取 GHCR 镜像）
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 查看日志：
 
 ```bash
 docker compose logs -f stickerhub
+```
+
+默认会拉取并运行：`ghcr.io/akkialab/stickerhub:latest`。
+
+## 本地构建测试（不依赖远程镜像）
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose -f docker-compose.local.yml logs -f stickerhub
 ```
 
 ## 绑定流程
