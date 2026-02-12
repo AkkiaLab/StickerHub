@@ -10,12 +10,10 @@ class Settings(BaseSettings):
     )
     feishu_app_id: str = Field(
         default="",
-        min_length=1,
         alias="FEISHU_APP_ID",
     )
     feishu_app_secret: str = Field(
         default="",
-        min_length=1,
         alias="FEISHU_APP_SECRET",
     )
     binding_db_path: str = Field(

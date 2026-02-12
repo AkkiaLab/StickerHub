@@ -13,7 +13,7 @@ class RelayStickerUseCase:
     def __init__(
         self,
         normalizer: MediaNormalizer,
-        target_sender: TargetPlatformSender,
+        target_sender: TargetPlatformSender | None,
         binding_service: BindingService,
     ) -> None:
         self._normalizer = normalizer
@@ -28,13 +28,22 @@ class RelayStickerUseCase:
             asset.media_kind,
             asset.mime_type,
         )
+
+        if not self._target_sender:
+            logger.debug("未配置目标平台发送器，跳过飞书转发")
+            return
+
         target_user_id = await self._binding_service.get_target_user_id(
             source_platform=asset.source_platform,
             source_user_id=asset.source_user_id,
             target_platform="feishu",
         )
         if not target_user_id:
-            raise RuntimeError("当前 Telegram 账号未绑定飞书。请先执行 /bind 完成跨平台绑定")
+            logger.info(
+                "用户未绑定飞书，跳过飞书转发: user=%s",
+                asset.source_user_id,
+            )
+            return
 
         normalized = await self._normalizer.normalize(asset)
         await self._target_sender.send(normalized, target_user_id=target_user_id)

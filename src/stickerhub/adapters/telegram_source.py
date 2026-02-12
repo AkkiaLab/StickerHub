@@ -1,8 +1,10 @@
 import asyncio
+import io
 import logging
 import re
 import secrets
 import time
+import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from math import ceil
@@ -12,6 +14,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
     Sticker,
     Update,
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 AssetHandler = Callable[[StickerAsset], Awaitable[None]]
 BindHandler = Callable[[str, str | None], Awaitable[str]]
 PackBatchMarkerHandler = Callable[[str, int, int, int, int, str], Awaitable[None]]
+NormalizeHandler = Callable[[StickerAsset], Awaitable[StickerAsset]]
 
 PACK_CALLBACK_PREFIX = "send_pack:"
 STOP_PACK_CALLBACK_PREFIX = "stop_pack:"
@@ -60,26 +64,35 @@ class RunningStickerPackTask:
     cancel_requested: bool = False
 
 
-def build_telegram_usage_text() -> str:
-    return (
-        "StickerHub 使用说明：\n"
-        "1. 发送 /bind 获取魔法字符串，在另一平台使用 /bind <code> 完成绑定\n"
-        "2. 直接发送贴纸/图片/GIF/视频，机器人会转发到飞书\n"
-        "3. 发送单个贴纸后，可点击按钮继续发送整个表情包\n"
-        "\n"
-        "支持命令：\n"
-        "/bind [魔法字符串]\n"
-        "/help\n"
-        "/start"
+def build_telegram_usage_text(feishu_enabled: bool = True) -> str:
+    lines = [
+        "StickerHub 使用说明：",
+        "1. 发送贴纸/图片/GIF/视频，机器人会回复原始图片",
+        "2. 发送单个贴纸后，可点击按钮下载 ZIP 或获取图片组",
+    ]
+    if feishu_enabled:
+        lines.append("3. 配置飞书后，可使用 /bind 绑定账号，贴纸会同时转发到飞书")
+    lines.extend(
+        [
+            "",
+            "支持命令：",
+            "/help",
+            "/start",
+        ]
     )
+    if feishu_enabled:
+        lines.append("/bind [魔法字符串]")
+    return "\n".join(lines)
 
 
-def get_telegram_bot_commands() -> list[BotCommand]:
-    return [
-        BotCommand("bind", "绑定账号：/bind 或 /bind <code>"),
+def get_telegram_bot_commands(feishu_enabled: bool = True) -> list[BotCommand]:
+    commands = [
         BotCommand("help", "查看使用说明"),
         BotCommand("start", "开始使用并查看说明"),
     ]
+    if feishu_enabled:
+        commands.insert(0, BotCommand("bind", "绑定账号：/bind 或 /bind <code>"))
+    return commands
 
 
 def build_telegram_application(
@@ -87,6 +100,8 @@ def build_telegram_application(
     on_asset: AssetHandler,
     on_bind: BindHandler,
     on_pack_batch_marker: PackBatchMarkerHandler | None = None,
+    on_normalize: NormalizeHandler | None = None,
+    feishu_enabled: bool = True,
 ) -> Application:
     application = Application.builder().token(token).build()
     pending_pack_requests: dict[str, PendingStickerPackRequest] = {}
@@ -108,7 +123,7 @@ def build_telegram_application(
         del context
         if not update.message:
             return
-        await update.message.reply_text(build_telegram_usage_text())
+        await update.message.reply_text(build_telegram_usage_text(feishu_enabled))
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
@@ -129,12 +144,24 @@ def build_telegram_application(
             )
             await on_asset(asset)
 
+            # 单张贴纸发送后，在 Telegram 回复一份归一化后的原图
             if update.message.sticker and update.effective_user:
+                effective_normalize = on_normalize or _identity_normalize
+                try:
+                    normalized = await effective_normalize(asset)
+                    await _send_single_sticker_reply(
+                        message=update.message,
+                        normalized=normalized,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("回复单张贴纸原图失败")
+
                 await _offer_send_pack_button(
                     message=update.message,
                     context=context,
                     effective_user_id=str(update.effective_user.id),
                     pending_pack_requests=pending_pack_requests,
+                    feishu_enabled=feishu_enabled,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.exception("处理 Telegram 消息失败")
@@ -149,10 +176,11 @@ def build_telegram_application(
         _cleanup_pending_requests(pending_pack_requests)
 
         data = query.data or ""
-        if not data.startswith(PACK_CALLBACK_PREFIX):
+        parsed = _parse_pack_callback_data(data)
+        if parsed is None:
             return
 
-        token = data[len(PACK_CALLBACK_PREFIX) :]
+        mode, token = parsed
         request = pending_pack_requests.get(token)
         if request is None:
             await query.edit_message_text("该操作已过期，请重新发送一个贴纸再试。")
@@ -196,25 +224,51 @@ def build_telegram_application(
         )
         running_pack_tasks[task_id] = running_task
 
+        mode_labels = {"feishu": "发送到飞书", "zip": "打包 ZIP", "photos": "发送图片组"}
+        mode_label = mode_labels.get(mode, mode)
+
         await query.edit_message_text(
             text=(
-                f"开始发送表情包《{request.set_name}》...\n"
-                f"每批 {PACK_BATCH_SIZE} 个并发发送。\n"
+                f"开始{mode_label}：表情包《{request.set_name}》...\n"
+                f"每批 {PACK_BATCH_SIZE} 个并发处理。\n"
                 "可随时点击下方按钮停止任务。"
             ),
             reply_markup=_build_stop_keyboard(task_id),
         )
 
-        context.application.create_task(
-            _run_sticker_pack_task(
-                context=context,
-                request=request,
-                running_task=running_task,
-                on_asset=on_asset,
-                on_pack_batch_marker=on_pack_batch_marker,
-                running_pack_tasks=running_pack_tasks,
+        effective_normalize: NormalizeHandler = on_normalize or _identity_normalize
+
+        if mode == "feishu":
+            context.application.create_task(
+                _run_sticker_pack_task(
+                    context=context,
+                    request=request,
+                    running_task=running_task,
+                    on_asset=on_asset,
+                    on_pack_batch_marker=on_pack_batch_marker,
+                    running_pack_tasks=running_pack_tasks,
+                )
             )
-        )
+        elif mode == "zip":
+            context.application.create_task(
+                _run_sticker_pack_task_zip(
+                    context=context,
+                    request=request,
+                    running_task=running_task,
+                    on_normalize=effective_normalize,
+                    running_pack_tasks=running_pack_tasks,
+                )
+            )
+        elif mode == "photos":
+            context.application.create_task(
+                _run_sticker_pack_task_photos(
+                    context=context,
+                    request=request,
+                    running_task=running_task,
+                    on_normalize=effective_normalize,
+                    running_pack_tasks=running_pack_tasks,
+                )
+            )
 
     async def handle_stop_pack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -246,7 +300,7 @@ def build_telegram_application(
         if not update.message or not update.message.text:
             return
         await update.message.reply_text(
-            f"不支持的命令：{update.message.text}\n\n{build_telegram_usage_text()}"
+            f"不支持的命令：{update.message.text}\n\n{build_telegram_usage_text(feishu_enabled)}"
         )
 
     async def handle_unsupported_message(
@@ -256,7 +310,9 @@ def build_telegram_application(
         del context
         if not update.message:
             return
-        await update.message.reply_text("暂不支持该消息类型。\n\n" + build_telegram_usage_text())
+        await update.message.reply_text(
+            "暂不支持该消息类型。\n\n" + build_telegram_usage_text(feishu_enabled)
+        )
 
     message_filter = (
         filters.Sticker.ALL
@@ -269,7 +325,8 @@ def build_telegram_application(
 
     unsupported_filter = ~message_filter & ~filters.COMMAND
 
-    application.add_handler(CommandHandler("bind", handle_bind))
+    if feishu_enabled:
+        application.add_handler(CommandHandler("bind", handle_bind))
     application.add_handler(CommandHandler("help", handle_help))
     application.add_handler(CommandHandler("start", handle_help))
     application.add_handler(
@@ -486,6 +543,7 @@ async def _offer_send_pack_button(
     context: ContextTypes.DEFAULT_TYPE,
     effective_user_id: str,
     pending_pack_requests: dict[str, PendingStickerPackRequest],
+    feishu_enabled: bool = True,
 ) -> None:
     sticker = message.sticker
     if not sticker:
@@ -505,7 +563,6 @@ async def _offer_send_pack_button(
     total = len(sticker_set.stickers)
     remaining = max(total - 1, 0)
     if remaining == 0:
-        await message.reply_text("当前贴纸已发送。该表情包没有其它可发送表情。")
         return
 
     token = secrets.token_hex(6)
@@ -518,24 +575,33 @@ async def _offer_send_pack_button(
         created_at=int(time.time()),
     )
 
-    keyboard = InlineKeyboardMarkup(
+    buttons: list[list[InlineKeyboardButton]] = [
         [
+            InlineKeyboardButton(
+                text=f"📦 下载 ZIP 包（全部 {total} 个）",
+                callback_data=f"{PACK_CALLBACK_PREFIX}zip:{token}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"🖼 Telegram 图片组（全部 {total} 个）",
+                callback_data=f"{PACK_CALLBACK_PREFIX}photos:{token}",
+            )
+        ],
+    ]
+    if feishu_enabled:
+        buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f"发送整个表情包（共 {total} 个）",
-                    callback_data=f"{PACK_CALLBACK_PREFIX}{token}",
+                    text=f"📤 发送到飞书（剩余 {remaining} 个）",
+                    callback_data=f"{PACK_CALLBACK_PREFIX}feishu:{token}",
                 )
             ]
-        ]
-    )
+        )
 
     await message.reply_text(
-        (
-            "当前表情已发送到飞书。\n"
-            f"是否继续发送整个表情包《{set_name}》？\n"
-            f"将额外发送 {remaining} 个（每批 {PACK_BATCH_SIZE} 个并发）。"
-        ),
-        reply_markup=keyboard,
+        f"表情包《{set_name}》共 {total} 个表情，请选择整包获取方式：",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
     logger.info(
@@ -545,6 +611,32 @@ async def _offer_send_pack_button(
         set_name,
         total,
     )
+
+
+async def _send_single_sticker_reply(
+    message: Message,
+    normalized: StickerAsset,
+) -> None:
+    """在 Telegram 回复归一化后的原始图片/动图，方便用户直接保存或添加到手机相册。"""
+    if normalized.is_animated:
+        await message.reply_document(
+            document=normalized.content,
+            filename=normalized.file_name,
+            caption="已转换为动图源文件，可直接下载保存",
+        )
+    else:
+        try:
+            await message.reply_photo(
+                photo=normalized.content,
+                filename=normalized.file_name,
+                caption="已转换为原始图片，长按可保存",
+            )
+        except Exception:  # noqa: BLE001
+            await message.reply_document(
+                document=normalized.content,
+                filename=normalized.file_name,
+                caption="已转换为原始图片，可直接下载保存",
+            )
 
 
 async def _extract_asset(
@@ -708,3 +800,365 @@ def _cleanup_pending_requests(pending_pack_requests: dict[str, PendingStickerPac
 
 def _safe_pack_name(set_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", set_name)
+
+
+def _parse_pack_callback_data(data: str) -> tuple[str, str] | None:
+    """解析整包发送回调数据，返回 (mode, token) 或 None。"""
+    if not data.startswith(PACK_CALLBACK_PREFIX):
+        return None
+    rest = data[len(PACK_CALLBACK_PREFIX) :]
+    parts = rest.split(":", 1)
+    if len(parts) != 2:
+        return None
+    mode, token = parts
+    if mode not in {"feishu", "zip", "photos"}:
+        return None
+    return mode, token
+
+
+async def _identity_normalize(asset: StickerAsset) -> StickerAsset:
+    """无操作归一化器，原样返回素材。"""
+    return asset
+
+
+async def _download_and_normalize_batch(
+    batch: list[Sticker],
+    bot: Bot,
+    source_user_id: str,
+    file_prefix: str,
+    on_normalize: NormalizeHandler,
+    set_name: str,
+) -> tuple[list[StickerAsset], int]:
+    """下载并归一化一批贴纸，返回 (成功素材列表, 失败数)。"""
+
+    async def _process(sticker: Sticker) -> StickerAsset | None:
+        try:
+            asset = await _build_sticker_asset(
+                sticker=sticker,
+                bot=bot,
+                source_user_id=source_user_id,
+                file_prefix=file_prefix,
+            )
+            return await on_normalize(asset)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "下载/归一化表情失败: set=%s sticker=%s",
+                set_name,
+                sticker.file_unique_id,
+            )
+            return None
+
+    results = await asyncio.gather(*[_process(s) for s in batch])
+    assets = [r for r in results if r is not None]
+    failed = len(results) - len(assets)
+    return assets, failed
+
+
+async def _run_sticker_pack_task_zip(
+    context: ContextTypes.DEFAULT_TYPE,
+    request: PendingStickerPackRequest,
+    running_task: RunningStickerPackTask,
+    on_normalize: NormalizeHandler,
+    running_pack_tasks: dict[str, RunningStickerPackTask],
+) -> None:
+    """整包打包为 ZIP 任务：下载、归一化后打包为 ZIP 发送到 Telegram。"""
+    bot = context.bot
+
+    try:
+        sticker_set = await bot.get_sticker_set(request.set_name)
+        stickers = list(sticker_set.stickers)
+
+        if not stickers:
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text="该表情包没有表情可打包。",
+                reply_markup=None,
+            )
+            return
+
+        total = len(stickers)
+        total_batches = ceil(total / PACK_BATCH_SIZE)
+        collected: list[StickerAsset] = []
+        failed = 0
+
+        logger.info(
+            "开始 ZIP 打包任务: task=%s user=%s set=%s total=%s",
+            running_task.task_id,
+            running_task.telegram_user_id,
+            request.set_name,
+            total,
+        )
+
+        for batch_index in range(total_batches):
+            if running_task.cancel_requested:
+                break
+
+            start = batch_index * PACK_BATCH_SIZE
+            end = min(start + PACK_BATCH_SIZE, total)
+            batch = stickers[start:end]
+
+            assets, batch_failed = await _download_and_normalize_batch(
+                batch=batch,
+                bot=bot,
+                source_user_id=request.source_user_id,
+                file_prefix=f"pack_{_safe_pack_name(request.set_name)}",
+                on_normalize=on_normalize,
+                set_name=request.set_name,
+            )
+            collected.extend(assets)
+            failed += batch_failed
+
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text=(
+                    f"正在打包表情包《{request.set_name}》\n"
+                    f"批次: {batch_index + 1}/{total_batches}\n"
+                    f"进度: 成功 {len(collected)} / 失败 {failed} / 总计 {total}"
+                ),
+                reply_markup=(
+                    None
+                    if running_task.cancel_requested
+                    else _build_stop_keyboard(running_task.task_id)
+                ),
+            )
+
+        if running_task.cancel_requested:
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text=(
+                    f"已停止打包表情包《{request.set_name}》\n"
+                    f"已完成: 成功 {len(collected)} / 失败 {failed} / 总计 {total}"
+                ),
+                reply_markup=None,
+            )
+            logger.info("ZIP 打包任务已停止: task=%s", running_task.task_id)
+            return
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            seen_names: set[str] = set()
+            for asset in collected:
+                name = _deduplicate_filename(asset.file_name, seen_names)
+                seen_names.add(name)
+                zf.writestr(name, asset.content)
+
+        zip_buffer.seek(0)
+        zip_filename = f"{_safe_pack_name(request.set_name)}.zip"
+
+        await _edit_task_message(
+            bot=bot,
+            running_task=running_task,
+            text="正在发送 ZIP 文件...",
+            reply_markup=None,
+        )
+
+        await bot.send_document(
+            chat_id=running_task.origin_chat_id,
+            document=zip_buffer,
+            filename=zip_filename,
+            caption=f"表情包《{request.set_name}》（共 {len(collected)} 个）",
+        )
+
+        await _edit_task_message(
+            bot=bot,
+            running_task=running_task,
+            text=(
+                f"表情包《{request.set_name}》ZIP 打包完成\n"
+                f"成功: {len(collected)}，失败: {failed}，总计: {total}"
+            ),
+            reply_markup=None,
+        )
+        logger.info(
+            "ZIP 打包任务完成: task=%s collected=%s failed=%s",
+            running_task.task_id,
+            len(collected),
+            failed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("打包整个表情包失败: task=%s", running_task.task_id)
+        await _edit_task_message(
+            bot=bot,
+            running_task=running_task,
+            text=f"打包整个表情包失败: {exc}",
+            reply_markup=None,
+        )
+    finally:
+        running_pack_tasks.pop(running_task.task_id, None)
+
+
+async def _run_sticker_pack_task_photos(
+    context: ContextTypes.DEFAULT_TYPE,
+    request: PendingStickerPackRequest,
+    running_task: RunningStickerPackTask,
+    on_normalize: NormalizeHandler,
+    running_pack_tasks: dict[str, RunningStickerPackTask],
+) -> None:
+    """整包以图片组形式发送到 Telegram 聊天。"""
+    bot = context.bot
+
+    try:
+        sticker_set = await bot.get_sticker_set(request.set_name)
+        stickers = list(sticker_set.stickers)
+
+        if not stickers:
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text="该表情包没有表情可发送。",
+                reply_markup=None,
+            )
+            return
+
+        total = len(stickers)
+        total_batches = ceil(total / PACK_BATCH_SIZE)
+        sent = 0
+        failed = 0
+
+        logger.info(
+            "开始图片组发送任务: task=%s user=%s set=%s total=%s",
+            running_task.task_id,
+            running_task.telegram_user_id,
+            request.set_name,
+            total,
+        )
+
+        for batch_index in range(total_batches):
+            if running_task.cancel_requested:
+                break
+
+            start = batch_index * PACK_BATCH_SIZE
+            end = min(start + PACK_BATCH_SIZE, total)
+            batch = stickers[start:end]
+
+            assets, batch_failed = await _download_and_normalize_batch(
+                batch=batch,
+                bot=bot,
+                source_user_id=request.source_user_id,
+                file_prefix=f"pack_{_safe_pack_name(request.set_name)}",
+                on_normalize=on_normalize,
+                set_name=request.set_name,
+            )
+            failed += batch_failed
+
+            if assets:
+                batch_sent, batch_send_failed = await _send_telegram_media_group_safe(
+                    bot=bot,
+                    chat_id=running_task.origin_chat_id,
+                    assets=assets,
+                )
+                sent += batch_sent
+                failed += batch_send_failed
+
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text=(
+                    f"正在发送图片组《{request.set_name}》\n"
+                    f"批次: {batch_index + 1}/{total_batches}\n"
+                    f"进度: 成功 {sent} / 失败 {failed} / 总计 {total}"
+                ),
+                reply_markup=(
+                    None
+                    if running_task.cancel_requested
+                    else _build_stop_keyboard(running_task.task_id)
+                ),
+            )
+
+        if running_task.cancel_requested:
+            await _edit_task_message(
+                bot=bot,
+                running_task=running_task,
+                text=(
+                    f"已停止发送图片组《{request.set_name}》\n"
+                    f"已完成: 成功 {sent} / 失败 {failed} / 总计 {total}"
+                ),
+                reply_markup=None,
+            )
+            logger.info("图片组发送任务已停止: task=%s", running_task.task_id)
+            return
+
+        await _edit_task_message(
+            bot=bot,
+            running_task=running_task,
+            text=(
+                f"图片组《{request.set_name}》发送完成\n"
+                f"成功: {sent}，失败: {failed}，总计: {total}"
+            ),
+            reply_markup=None,
+        )
+        logger.info(
+            "图片组发送任务完成: task=%s sent=%s failed=%s",
+            running_task.task_id,
+            sent,
+            failed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("发送图片组失败: task=%s", running_task.task_id)
+        await _edit_task_message(
+            bot=bot,
+            running_task=running_task,
+            text=f"发送图片组失败: {exc}",
+            reply_markup=None,
+        )
+    finally:
+        running_pack_tasks.pop(running_task.task_id, None)
+
+
+async def _send_telegram_media_group_safe(
+    bot: Bot,
+    chat_id: int,
+    assets: list[StickerAsset],
+) -> tuple[int, int]:
+    """以 Telegram 图片组形式发送素材，失败时回退到逐个发送。返回 (成功数, 失败数)。"""
+    try:
+        media = [InputMediaPhoto(media=asset.content, filename=asset.file_name) for asset in assets]
+        await bot.send_media_group(chat_id=chat_id, media=media)
+        return len(assets), 0
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "图片组批量发送失败，回退到逐个发送: chat_id=%s count=%s",
+            chat_id,
+            len(assets),
+        )
+        sent = 0
+        failed = 0
+        for asset in assets:
+            try:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=asset.content,
+                    filename=asset.file_name,
+                )
+                sent += 1
+            except Exception:  # noqa: BLE001
+                try:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=asset.content,
+                        filename=asset.file_name,
+                    )
+                    sent += 1
+                except Exception:  # noqa: BLE001
+                    logger.exception("发送单张图片也失败: file=%s", asset.file_name)
+                    failed += 1
+        return sent, failed
+
+
+def _deduplicate_filename(name: str, seen: set[str]) -> str:
+    """处理 ZIP 内文件名冲突。"""
+    if name not in seen:
+        return name
+    dot_pos = name.rfind(".")
+    if dot_pos > 0:
+        stem, suffix = name[:dot_pos], name[dot_pos:]
+    else:
+        stem, suffix = name, ""
+    counter = 1
+    while True:
+        candidate = f"{stem}_{counter}{suffix}"
+        if candidate not in seen:
+            return candidate
+        counter += 1

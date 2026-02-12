@@ -4,8 +4,8 @@
 
 ## 项目范围
 
-- 项目是 `StickerHub`，用于跨平台表情素材转发与转换。
-- 当前产品范围是 `Telegram -> 飞书`。
+- 项目是 `StickerHub`，用于 Telegram 表情素材转换与获取，支持可选的飞书转发。
+- 飞书配置为可选，仅配置 Telegram Bot Token 即可使用核心功能。
 - 飞书事件接收必须使用长连接模式。
 - 不要在本项目新增 HTTP Webhook 监听端口。
 

@@ -8,6 +8,15 @@ from stickerhub.core.models import StickerAsset
 
 logger = logging.getLogger(__name__)
 
+# ffmpeg filter_complex：保留透明背景并生成调色板渲染 GIF。
+# 先将输入统一为 rgba、固定帧率与尺寸，再 split 为两路：
+# 一路生成带透明保留的调色板，另一路套用调色板输出 GIF。
+_GIF_TRANSPARENT_FILTER = (
+    "[0:v]format=rgba,fps=15,scale=512:-1:flags=lanczos,split[s0][s1];"
+    "[s0]palettegen=stats_mode=diff:reserve_transparent=on[p];"
+    "[s1][p]paletteuse=dither=bayer:bayer_scale=5:alpha_threshold=128"
+)
+
 
 class UnsupportedMediaError(Exception):
     """不支持的媒体格式。"""
@@ -70,8 +79,8 @@ class FfmpegMediaNormalizer:
                     [
                         "-i",
                         str(in_path),
-                        "-vf",
-                        "fps=15,scale=512:-1:flags=lanczos",
+                        "-filter_complex",
+                        _GIF_TRANSPARENT_FILTER,
                         "-loop",
                         "0",
                         str(out_path),
@@ -102,12 +111,18 @@ class FfmpegMediaNormalizer:
             out_path = Path(out_file.name)
 
         try:
+            # 对 webm (VP9+alpha) 显式指定 libvpx-vp9 解码器以确保 alpha 通道被解码
+            input_args: list[str] = []
+            if in_suffix == ".webm":
+                input_args = ["-c:v", "libvpx-vp9"]
+
             await _run_ffmpeg(
                 [
+                    *input_args,
                     "-i",
                     str(in_path),
-                    "-vf",
-                    "fps=15,scale=512:-1:flags=lanczos",
+                    "-filter_complex",
+                    _GIF_TRANSPARENT_FILTER,
                     "-loop",
                     "0",
                     str(out_path),
@@ -136,7 +151,7 @@ class FfmpegMediaNormalizer:
             out_path = Path(out_file.name)
 
         try:
-            await _run_ffmpeg(["-i", str(in_path), str(out_path)])
+            await _run_ffmpeg(["-i", str(in_path), "-pix_fmt", "rgba", str(out_path)])
             content = out_path.read_bytes()
             return StickerAsset(
                 source_platform=asset.source_platform,

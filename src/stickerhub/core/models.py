@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 MediaKind = Literal["sticker", "image", "gif", "video"]
+PackDeliveryMode = Literal["feishu", "zip", "photos"]
 
 
 @dataclass(slots=True)
