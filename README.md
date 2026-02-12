@@ -54,7 +54,8 @@ LOG_LEVEL=INFO
 
 说明：
 
-- 飞书需在应用后台开启机器人收发消息权限，并启用长连接事件能力。
+- 飞书需在应用后台开启机器人收发消息权限(im:message)以及获取与上传图片或文件资源权限(im:resource)
+- 飞书事件添加接收消息(im.message.receive_v1)并启用长连接事件能力。
 
 ## 使用 Docker Compose 部署（默认拉取 GHCR 镜像）
 
