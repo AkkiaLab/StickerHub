@@ -4,6 +4,8 @@ StickerHub 是一个在不同 IM 平台之间转换表情素材（Sticker/Image/
 
 当前阶段实现：**Telegram -> 飞书**，并提供 **Telegram/飞书双端身份绑定**（`/bind`）。
 
+![bind.gif](docs/bind.gif)
+
 ## 功能范围
 
 - 监听 Telegram Bot 收到的单个素材：Sticker、图片、GIF、视频
@@ -54,8 +56,9 @@ LOG_LEVEL=INFO
 
 说明：
 
-- 飞书需在应用后台开启机器人收发消息权限(im:message)以及获取与上传图片或文件资源权限(im:resource)
-- 飞书事件添加接收消息(im.message.receive_v1)并启用长连接事件能力。
+- 飞书需在应用后台开启机器人收发消息权限(im:message)以及获取与上传图片或文件资源权限(im:resource) ![lark_permission.png](docs/lark_permission.png)
+- 飞书事件添加接收消息(im.message.receive_v1)并启用长连接事件能力。 ![lark_event.png](docs/lark_event.png)
+
 
 ## 使用 Docker Compose 部署（默认拉取 GHCR 镜像）
 
@@ -84,7 +87,7 @@ docker compose -f docker-compose.local.yml logs -f stickerhub
 ```
 
 ## 绑定流程
-
+![20260213-050307.gif](../../Downloads/20260213-050307.gif)
 1. 在 Telegram 或飞书任一端发送：`/bind`
 2. 机器人返回一串魔法字符串
 3. 在另一端发送：`/bind <魔法字符串>`
