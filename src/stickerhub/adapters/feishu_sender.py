@@ -5,6 +5,7 @@ from typing import Literal
 import httpx
 
 from stickerhub.core.models import StickerAsset
+from stickerhub.utils.url_masking import mask_url
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class FeishuSender:
         self, asset: StickerAsset, target_mode: Literal["bot", "webhook"], target: str
     ) -> None:
         # 避免在日志中暴露 webhook URL 中的敏感 token
-        safe_target = target if target_mode == "bot" else _mask_webhook_url(target)
+        safe_target = target if target_mode == "bot" else mask_url(target)
         logger.debug(
             "准备发送图片到飞书: mode=%s target=%s file=%s mime=%s size=%s",
             target_mode,
@@ -197,23 +198,3 @@ class FeishuSender:
         code_ok = code in (None, 0, "0")
         if not status_ok or not code_ok:
             raise RuntimeError(f"发送飞书 webhook 消息失败: {payload}")
-
-
-PATH_PREFIX_LENGTH = 20
-PATH_SUFFIX_LENGTH = 8
-PATH_MASK_THRESHOLD = PATH_PREFIX_LENGTH + PATH_SUFFIX_LENGTH
-
-
-def _mask_webhook_url(webhook_url: str) -> str:
-    """脱敏 webhook URL，仅保留 host 和末尾部分，避免泄露敏感 token"""
-    try:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(webhook_url)
-        if parsed.path and len(parsed.path) > PATH_MASK_THRESHOLD:
-            masked_path = f"{parsed.path[:PATH_PREFIX_LENGTH]}...{parsed.path[-PATH_SUFFIX_LENGTH:]}"
-        else:
-            masked_path = parsed.path
-        return f"{parsed.scheme}://{parsed.netloc}{masked_path}"
-    except Exception:  # noqa: BLE001
-        return "[webhook_url_masked]"
