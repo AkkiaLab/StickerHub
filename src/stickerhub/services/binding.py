@@ -418,10 +418,13 @@ class BindingService:
     ) -> str:
         normalized_url = _normalize_feishu_webhook_url(webhook_url, self._webhook_allowed_hosts)
         if not normalized_url:
+            # 脱敏 URL 用于日志
+            masked_url = _mask_url_for_log(webhook_url)
             logger.warning(
-                "Webhook 绑定失败: 平台=%s user=%s 原因=URL格式不合法或域名不在白名单内",
+                "Webhook 绑定失败: 平台=%s user=%s 原因=URL格式不合法或域名不在白名单内 url=%s",
                 source_platform,
                 source_user_id,
+                masked_url,
             )
             allowed_hosts_str = ", ".join(self._webhook_allowed_hosts)
             return (
@@ -523,3 +526,16 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str]) -> str | N
     if "/open-apis/bot/v2/hook/" not in parsed.path:
         return None
     return normalized
+
+
+def _mask_url_for_log(url: str) -> str:
+    """脱敏 URL 用于日志输出，避免泄露敏感 token"""
+    try:
+        parsed = urlparse(url)
+        if parsed.path and len(parsed.path) > 30:
+            masked_path = f"{parsed.path[:20]}...{parsed.path[-8:]}"
+        else:
+            masked_path = parsed.path
+        return f"{parsed.scheme}://{parsed.netloc}{masked_path}"
+    except Exception:  # noqa: BLE001
+        return "[url_masked]"

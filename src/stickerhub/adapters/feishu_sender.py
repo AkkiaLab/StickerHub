@@ -199,14 +199,18 @@ class FeishuSender:
             raise RuntimeError(f"发送飞书 webhook 消息失败: {payload}")
 
 
+PATH_PREFIX_LENGTH = 20
+PATH_SUFFIX_LENGTH = 8
+
+
 def _mask_webhook_url(webhook_url: str) -> str:
     """脱敏 webhook URL，仅保留 host 和末尾部分，避免泄露敏感 token"""
     try:
         from urllib.parse import urlparse
 
         parsed = urlparse(webhook_url)
-        if parsed.path and len(parsed.path) > 20:
-            masked_path = f"{parsed.path[:20]}...{parsed.path[-8:]}"
+        if parsed.path and len(parsed.path) > PATH_PREFIX_LENGTH:
+            masked_path = f"{parsed.path[:PATH_PREFIX_LENGTH]}...{parsed.path[-PATH_SUFFIX_LENGTH:]}"
         else:
             masked_path = parsed.path
         return f"{parsed.scheme}://{parsed.netloc}{masked_path}"
