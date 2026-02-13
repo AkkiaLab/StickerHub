@@ -137,6 +137,31 @@ async def _bind_webhook_invalid_url(db_path: str) -> None:
     assert "格式不合法" in reply
 
 
+async def _bind_webhook_domain_whitelist_enforcement(db_path: str) -> None:
+    """测试域名白名单校验（SSRF 防护）"""
+    store = BindingStore(db_path)
+    # 自定义白名单，仅允许 open.feishu.cn
+    service = BindingService(
+        store=store, magic_ttl_seconds=600, webhook_allowed_hosts=["open.feishu.cn"]
+    )
+    await service.initialize()
+
+    # 合法域名应通过
+    valid_url = "https://open.feishu.cn/open-apis/bot/v2/hook/valid_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_ok", valid_url)
+    assert "绑定成功" in reply
+
+    # 不在白名单的域名应被拒绝（防止 SSRF）
+    blocked_url = "https://evil.com/open-apis/bot/v2/hook/malicious"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_block", blocked_url)
+    assert "白名单" in reply or "格式不合法" in reply
+
+    # open.larksuite.com 不在自定义白名单中，应被拒绝
+    larksuite_url = "https://open.larksuite.com/open-apis/bot/v2/hook/token"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_lark", larksuite_url)
+    assert "白名单" in reply or "格式不合法" in reply
+
+
 def test_bind_flow_with_sqlite(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
     asyncio.run(_bind_flow(str(db_path)))
@@ -175,3 +200,8 @@ def test_switch_from_webhook_to_bot(tmp_path) -> None:
 def test_bind_webhook_invalid_url(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
     asyncio.run(_bind_webhook_invalid_url(str(db_path)))
+
+
+def test_bind_webhook_domain_whitelist(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_domain_whitelist_enforcement(str(db_path)))
