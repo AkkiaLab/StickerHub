@@ -344,9 +344,18 @@ class BindingStore:
 
 
 class BindingService:
-    def __init__(self, store: BindingStore, magic_ttl_seconds: int = 600) -> None:
+    def __init__(
+        self,
+        store: BindingStore,
+        magic_ttl_seconds: int = 600,
+        webhook_allowed_hosts: list[str] | None = None,
+    ) -> None:
         self._store = store
         self._magic_ttl_seconds = magic_ttl_seconds
+        self._webhook_allowed_hosts = webhook_allowed_hosts or [
+            "open.feishu.cn",
+            "open.larksuite.com",
+        ]
 
     async def initialize(self) -> None:
         await self._store.ensure_initialized()
@@ -407,15 +416,17 @@ class BindingService:
         source_user_id: str,
         webhook_url: str,
     ) -> str:
-        normalized_url = _normalize_feishu_webhook_url(webhook_url)
+        normalized_url = _normalize_feishu_webhook_url(webhook_url, self._webhook_allowed_hosts)
         if not normalized_url:
             logger.warning(
-                "Webhook 绑定失败: 平台=%s user=%s 原因=URL格式不合法",
+                "Webhook 绑定失败: 平台=%s user=%s 原因=URL格式不合法或域名不在白名单内",
                 source_platform,
                 source_user_id,
             )
+            allowed_hosts_str = ", ".join(self._webhook_allowed_hosts)
             return (
-                "绑定失败: Webhook 地址格式不合法。\n"
+                "绑定失败: Webhook 地址格式不合法或域名不在白名单内。\n"
+                f"允许的域名：{allowed_hosts_str}\n"
                 "请填写飞书自定义机器人 Webhook 地址，例如：\n"
                 "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
             )
@@ -488,7 +499,13 @@ class BindingService:
         return None
 
 
-def _normalize_feishu_webhook_url(url: str) -> str | None:
+def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str]) -> str | None:
+    """
+    验证并归一化飞书 Webhook URL。
+    - 必须是 https 协议
+    - 域名必须在白名单内（防止 SSRF）
+    - 路径必须包含 /open-apis/bot/v2/hook/
+    """
     normalized = url.strip()
     if not normalized:
         return None
@@ -498,6 +515,11 @@ def _normalize_feishu_webhook_url(url: str) -> str | None:
         return None
     if not parsed.netloc:
         return None
+
+    # 域名白名单校验（SSRF 防护）
+    if parsed.netloc.lower() not in [host.lower() for host in allowed_hosts]:
+        return None
+
     if "/open-apis/bot/v2/hook/" not in parsed.path:
         return None
     return normalized

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("BINDING_DB_PATH", "BINDING_STORE_PATH"),
     )
     bind_magic_ttl_seconds: int = Field(default=600, alias="BIND_MAGIC_TTL_SECONDS")
+    feishu_webhook_allowed_hosts: list[str] = Field(
+        default=["open.feishu.cn", "open.larksuite.com"],
+        alias="FEISHU_WEBHOOK_ALLOWED_HOSTS",
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     model_config = SettingsConfigDict(
