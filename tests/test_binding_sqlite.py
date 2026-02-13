@@ -137,7 +137,7 @@ async def _bind_webhook_invalid_url(db_path: str) -> None:
     assert "格式不合法" in reply
 
 
-async def _test_bind_webhook_domain_whitelist(db_path: str) -> None:
+async def _bind_webhook_domain_whitelist(db_path: str) -> None:
     """测试域名白名单校验（SSRF 防护）"""
     store = BindingStore(db_path)
     # 自定义白名单，仅允许 open.feishu.cn
@@ -204,4 +204,4 @@ def test_bind_webhook_invalid_url(tmp_path) -> None:
 
 def test_bind_webhook_domain_whitelist(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
-    asyncio.run(_test_bind_webhook_domain_whitelist(str(db_path)))
+    asyncio.run(_bind_webhook_domain_whitelist(str(db_path)))

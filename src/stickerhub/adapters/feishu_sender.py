@@ -201,6 +201,7 @@ class FeishuSender:
 
 PATH_PREFIX_LENGTH = 20
 PATH_SUFFIX_LENGTH = 8
+PATH_MASK_THRESHOLD = PATH_PREFIX_LENGTH + PATH_SUFFIX_LENGTH
 
 
 def _mask_webhook_url(webhook_url: str) -> str:
@@ -209,7 +210,7 @@ def _mask_webhook_url(webhook_url: str) -> str:
         from urllib.parse import urlparse
 
         parsed = urlparse(webhook_url)
-        if parsed.path and len(parsed.path) > PATH_PREFIX_LENGTH:
+        if parsed.path and len(parsed.path) > PATH_MASK_THRESHOLD:
             masked_path = f"{parsed.path[:PATH_PREFIX_LENGTH]}...{parsed.path[-PATH_SUFFIX_LENGTH:]}"
         else:
             masked_path = parsed.path

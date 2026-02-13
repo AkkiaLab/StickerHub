@@ -528,12 +528,20 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str]) -> str | N
     return normalized
 
 
+# Constants for URL masking (shared with feishu_sender.py)
+_URL_PATH_PREFIX_LENGTH = 20
+_URL_PATH_SUFFIX_LENGTH = 8
+_URL_PATH_MASK_THRESHOLD = _URL_PATH_PREFIX_LENGTH + _URL_PATH_SUFFIX_LENGTH
+
+
 def _mask_url_for_log(url: str) -> str:
     """脱敏 URL 用于日志输出，避免泄露敏感 token"""
     try:
         parsed = urlparse(url)
-        if parsed.path and len(parsed.path) > 30:
-            masked_path = f"{parsed.path[:20]}...{parsed.path[-8:]}"
+        if parsed.path and len(parsed.path) > _URL_PATH_MASK_THRESHOLD:
+            masked_path = (
+                f"{parsed.path[:_URL_PATH_PREFIX_LENGTH]}...{parsed.path[-_URL_PATH_SUFFIX_LENGTH:]}"
+            )
         else:
             masked_path = parsed.path
         return f"{parsed.scheme}://{parsed.netloc}{masked_path}"
