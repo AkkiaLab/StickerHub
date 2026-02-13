@@ -33,12 +33,11 @@ class RelayStickerUseCase:
             logger.debug("未配置目标平台发送器，跳过飞书转发")
             return
 
-        target_user_id = await self._binding_service.get_target_user_id(
+        target = await self._binding_service.get_feishu_target(
             source_platform=asset.source_platform,
             source_user_id=asset.source_user_id,
-            target_platform="feishu",
         )
-        if not target_user_id:
+        if not target:
             logger.info(
                 "用户未绑定飞书，跳过飞书转发: user=%s",
                 asset.source_user_id,
@@ -46,11 +45,16 @@ class RelayStickerUseCase:
             return
 
         normalized = await self._normalizer.normalize(asset)
-        await self._target_sender.send(normalized, target_user_id=target_user_id)
+        await self._target_sender.send(
+            normalized,
+            target_mode=target.mode,
+            target=target.target,
+        )
         logger.info(
-            "转发成功: source=%s user=%s kind=%s mime=%s",
+            "转发成功: source=%s user=%s mode=%s kind=%s mime=%s",
             asset.source_platform,
             asset.source_user_id,
+            target.mode,
             normalized.media_kind,
             normalized.mime_type,
         )

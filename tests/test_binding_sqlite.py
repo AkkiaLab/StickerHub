@@ -75,6 +75,116 @@ async def _rebind_replaces_existing_account_on_same_hub(db_path: str) -> None:
     assert await service.get_target_user_id("telegram", "tg_x", "feishu") == "ou_new"
 
 
+async def _bind_webhook_flow(db_path: str) -> None:
+    store = BindingStore(db_path)
+    service = BindingService(store=store, magic_ttl_seconds=600)
+    await service.initialize()
+
+    webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/test_webhook"
+    reply = await service.handle_bind_webhook("telegram", "tg_webhook", webhook_url)
+    assert "绑定成功" in reply
+
+    target = await service.get_feishu_target("telegram", "tg_webhook")
+    assert target is not None
+    assert target.mode == "webhook"
+    assert target.target == webhook_url
+    assert await service.get_target_user_id("telegram", "tg_webhook", "feishu") is None
+
+
+async def _switch_from_bot_to_webhook(db_path: str) -> None:
+    store = BindingStore(db_path)
+    service = BindingService(store=store, magic_ttl_seconds=600)
+    await service.initialize()
+
+    tg_reply = await service.handle_bind_command("telegram", "tg_switch", None)
+    code = re.search(r"/bind\s+([A-Z0-9]+)", tg_reply).group(1)  # type: ignore[union-attr]
+    assert "绑定成功" in await service.handle_bind_command("feishu", "ou_switch_old", code)
+
+    webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/switch_webhook"
+    assert "绑定成功" in await service.handle_bind_webhook("telegram", "tg_switch", webhook_url)
+
+    target = await service.get_feishu_target("telegram", "tg_switch")
+    assert target is not None
+    assert target.mode == "webhook"
+    assert target.target == webhook_url
+    assert await service.get_target_user_id("telegram", "tg_switch", "feishu") is None
+
+
+async def _switch_from_webhook_to_bot(db_path: str) -> None:
+    store = BindingStore(db_path)
+    service = BindingService(store=store, magic_ttl_seconds=600)
+    await service.initialize()
+
+    webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/switch_back"
+    assert "绑定成功" in await service.handle_bind_webhook("telegram", "tg_back", webhook_url)
+
+    tg_reply = await service.handle_bind_command("telegram", "tg_back", None)
+    code = re.search(r"/bind\s+([A-Z0-9]+)", tg_reply).group(1)  # type: ignore[union-attr]
+    assert "绑定成功" in await service.handle_bind_command("feishu", "ou_new", code)
+
+    target = await service.get_feishu_target("telegram", "tg_back")
+    assert target is not None
+    assert target.mode == "bot"
+    assert target.target == "ou_new"
+
+
+async def _bind_webhook_invalid_url(db_path: str) -> None:
+    store = BindingStore(db_path)
+    service = BindingService(store=store, magic_ttl_seconds=600)
+    await service.initialize()
+
+    reply = await service.handle_bind_webhook("telegram", "tg_invalid", "http://example.com/abc")
+    assert "格式不合法" in reply
+
+
+async def _bind_webhook_domain_whitelist(db_path: str) -> None:
+    """测试域名白名单校验（SSRF 防护）"""
+    store = BindingStore(db_path)
+    # 自定义白名单，仅允许 open.feishu.cn
+    service = BindingService(
+        store=store, magic_ttl_seconds=600, webhook_allowed_hosts=["open.feishu.cn"]
+    )
+    await service.initialize()
+
+    # 合法域名应通过（不限制端口）
+    valid_url = "https://open.feishu.cn/open-apis/bot/v2/hook/valid_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_ok", valid_url)
+    assert "绑定成功" in reply
+
+    # 合法域名 + 自定义端口也应通过
+    valid_url_with_port = "https://open.feishu.cn:8443/open-apis/bot/v2/hook/token_with_port"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_port", valid_url_with_port)
+    assert "绑定成功" in reply
+
+    # 不在白名单的域名应被拒绝（防止 SSRF）
+    blocked_url = "https://evil.com/open-apis/bot/v2/hook/malicious"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_block", blocked_url)
+    assert "白名单" in reply
+
+    # open.larksuite.com 不在自定义白名单中，应被拒绝
+    larksuite_url = "https://open.larksuite.com/open-apis/bot/v2/hook/token"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_lark", larksuite_url)
+    assert "白名单" in reply
+
+
+async def _bind_webhook_whitelist_disabled(db_path: str) -> None:
+    """测试禁用白名单校验"""
+    store = BindingStore(db_path)
+    # 空列表表示禁用白名单
+    service = BindingService(store=store, magic_ttl_seconds=600, webhook_allowed_hosts=[])
+    await service.initialize()
+
+    # 任意域名都应通过（白名单已禁用）
+    custom_url = "https://custom.domain.com/open-apis/bot/v2/hook/custom_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_no_whitelist", custom_url)
+    assert "绑定成功" in reply
+
+    # 即使是非常规域名也应通过
+    another_url = "https://example.org/open-apis/bot/v2/hook/another_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_no_whitelist2", another_url)
+    assert "绑定成功" in reply
+
+
 def test_bind_flow_with_sqlite(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
     asyncio.run(_bind_flow(str(db_path)))
@@ -93,3 +203,33 @@ def test_rebind_current_account_to_new_hub(tmp_path) -> None:
 def test_rebind_replaces_existing_account_on_same_hub(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
     asyncio.run(_rebind_replaces_existing_account_on_same_hub(str(db_path)))
+
+
+def test_bind_webhook_flow(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_flow(str(db_path)))
+
+
+def test_switch_from_bot_to_webhook(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_switch_from_bot_to_webhook(str(db_path)))
+
+
+def test_switch_from_webhook_to_bot(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_switch_from_webhook_to_bot(str(db_path)))
+
+
+def test_bind_webhook_invalid_url(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_invalid_url(str(db_path)))
+
+
+def test_bind_webhook_domain_whitelist(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_domain_whitelist(str(db_path)))
+
+
+def test_bind_webhook_whitelist_disabled(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_whitelist_disabled(str(db_path)))

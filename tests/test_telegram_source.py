@@ -3,13 +3,17 @@ import time
 from types import SimpleNamespace
 
 from stickerhub.adapters.telegram_source import (
+    BIND_MODE_CALLBACK_PREFIX,
     PACK_CALLBACK_PREFIX,
     PendingStickerPackRequest,
+    PendingWebhookBindRequest,
     RunningStickerPackTask,
     _cleanup_pending_requests,
+    _cleanup_pending_webhook_requests,
     _deduplicate_filename,
     _detect_sticker_mime,
     _has_running_task_for_user,
+    _parse_bind_mode_callback_data,
     _parse_pack_callback_data,
     _send_single_sticker_reply,
 )
@@ -111,6 +115,25 @@ class TestParsePackCallbackData:
         assert result == ("zip", "token:with:colons")
 
 
+class TestParseBindModeCallbackData:
+    def test_valid_bot_mode(self) -> None:
+        result = _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}bot:123")
+        assert result == ("bot", "123")
+
+    def test_valid_webhook_mode(self) -> None:
+        result = _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}webhook:456")
+        assert result == ("webhook", "456")
+
+    def test_invalid_prefix(self) -> None:
+        assert _parse_bind_mode_callback_data("wrong:bot:123") is None
+
+    def test_invalid_mode(self) -> None:
+        assert _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}unknown:123") is None
+
+    def test_missing_user_id(self) -> None:
+        assert _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}bot:") is None
+
+
 class TestDeduplicateFilename:
     def test_no_conflict(self) -> None:
         assert _deduplicate_filename("sticker.png", set()) == "sticker.png"
@@ -155,3 +178,20 @@ def test_send_single_sticker_reply_animated_uses_document_not_animation() -> Non
 
     assert message.document_called is True
     assert message.animation_called is False
+
+
+def test_cleanup_pending_webhook_requests_removes_expired_only() -> None:
+    now = int(time.time())
+    pending = {
+        "expired_user": PendingWebhookBindRequest(
+            telegram_user_id="expired_user",
+            created_at=now - 3600,
+        ),
+        "fresh_user": PendingWebhookBindRequest(
+            telegram_user_id="fresh_user",
+            created_at=now,
+        ),
+    }
+    _cleanup_pending_webhook_requests(pending)
+    assert "expired_user" not in pending
+    assert "fresh_user" in pending

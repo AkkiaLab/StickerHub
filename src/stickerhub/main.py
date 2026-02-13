@@ -27,6 +27,7 @@ async def async_main() -> None:
     binding_service = BindingService(
         store=BindingStore(settings.binding_db_path),
         magic_ttl_seconds=settings.bind_magic_ttl_seconds,
+        webhook_allowed_hosts=settings.get_webhook_allowed_hosts(),
     )
     await binding_service.initialize()
 
@@ -56,23 +57,29 @@ async def async_main() -> None:
             end_index: int,
             set_name: str,
         ) -> None:
-            target_user_id = await binding_service.get_target_user_id(
+            target = await binding_service.get_feishu_target(
                 source_platform="telegram",
                 source_user_id=source_user_id,
-                target_platform="feishu",
             )
-            if not target_user_id:
+            if not target:
                 raise RuntimeError("当前 Telegram 账号未绑定飞书。请先执行 /bind 完成跨平台绑定")
 
             assert feishu_sender is not None  # narrowing for type checker
-            await feishu_sender.send_text(
-                text=(
-                    f"—— 表情包《{set_name}》批次 {batch_no}/{total_batches} "
-                    f"（第 {start_index}-{end_index} 个） ——"
-                ),
-                receive_id=target_user_id,
-                receive_id_type="open_id",
+            marker_text = (
+                f"—— 表情包《{set_name}》批次 {batch_no}/{total_batches} "
+                f"（第 {start_index}-{end_index} 个） ——"
             )
+            if target.mode == "bot":
+                await feishu_sender.send_text(
+                    text=marker_text,
+                    receive_id=target.target,
+                    receive_id_type="open_id",
+                )
+            else:
+                await feishu_sender.send_webhook_text(
+                    text=marker_text,
+                    webhook_url=target.target,
+                )
 
         on_pack_batch_marker = _pack_batch_marker
 
@@ -80,6 +87,9 @@ async def async_main() -> None:
         token=settings.telegram_bot_api_token,
         on_asset=relay_use_case.relay,
         on_bind=lambda user_id, arg: binding_service.handle_bind_command("telegram", user_id, arg),
+        on_bind_webhook=lambda user_id, url: binding_service.handle_bind_webhook(
+            "telegram", user_id, url
+        ),
         on_pack_batch_marker=on_pack_batch_marker,
         on_normalize=normalizer.normalize,
         feishu_enabled=feishu_enabled,

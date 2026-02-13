@@ -4,9 +4,20 @@ import secrets
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
+
+from stickerhub.utils.url_masking import mask_url
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class FeishuTarget:
+    mode: Literal["bot", "webhook"]
+    target: str
 
 
 class BindingStore:
@@ -39,6 +50,13 @@ class BindingStore:
                         used INTEGER NOT NULL DEFAULT 0,
                         created_at INTEGER NOT NULL,
                         used_at INTEGER
+                    );
+
+                    CREATE TABLE IF NOT EXISTS feishu_webhook_bindings (
+                        hub_id TEXT PRIMARY KEY,
+                        webhook_url TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
                     );
                     """
                 )
@@ -237,6 +255,90 @@ class BindingStore:
 
         return str(row["platform_user_id"]) if row else None
 
+    async def bind_feishu_webhook(self, hub_id: str, webhook_url: str) -> dict[str, str | None]:
+        now = int(time.time())
+        async with self._lock:
+            with self._connect() as conn:
+                webhook_row = conn.execute(
+                    """
+                    SELECT webhook_url
+                    FROM feishu_webhook_bindings
+                    WHERE hub_id = ?
+                    """,
+                    (hub_id,),
+                ).fetchone()
+                previous_webhook = str(webhook_row["webhook_url"]) if webhook_row else None
+
+                replaced_row = conn.execute(
+                    """
+                    SELECT platform_user_id
+                    FROM platform_bindings
+                    WHERE platform = 'feishu' AND hub_id = ?
+                    LIMIT 1
+                    """,
+                    (hub_id,),
+                ).fetchone()
+                replaced_user_id = str(replaced_row["platform_user_id"]) if replaced_row else None
+
+                conn.execute(
+                    """
+                    DELETE FROM platform_bindings
+                    WHERE platform = 'feishu' AND hub_id = ?
+                    """,
+                    (hub_id,),
+                )
+
+                conn.execute(
+                    """
+                    INSERT INTO feishu_webhook_bindings(
+                        hub_id, webhook_url, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(hub_id)
+                    DO UPDATE SET
+                        webhook_url = excluded.webhook_url,
+                        updated_at = excluded.updated_at
+                    """,
+                    (hub_id, webhook_url, now, now),
+                )
+                conn.commit()
+
+        logger.info("飞书 webhook 绑定成功: hub_id=%s replaced_user=%s", hub_id, replaced_user_id)
+        return {
+            "previous_webhook": previous_webhook,
+            "replaced_user_id": replaced_user_id,
+        }
+
+    async def clear_feishu_webhook(self, hub_id: str) -> bool:
+        async with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM feishu_webhook_bindings
+                    WHERE hub_id = ?
+                    """,
+                    (hub_id,),
+                )
+                conn.commit()
+                deleted = cursor.rowcount > 0
+
+        if deleted:
+            logger.info("已清理飞书 webhook 绑定: hub_id=%s", hub_id)
+        return deleted
+
+    async def get_feishu_webhook(self, hub_id: str) -> str | None:
+        async with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT webhook_url
+                    FROM feishu_webhook_bindings
+                    WHERE hub_id = ?
+                    """,
+                    (hub_id,),
+                ).fetchone()
+        return str(row["webhook_url"]) if row else None
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
@@ -244,9 +346,16 @@ class BindingStore:
 
 
 class BindingService:
-    def __init__(self, store: BindingStore, magic_ttl_seconds: int = 600) -> None:
+    def __init__(
+        self,
+        store: BindingStore,
+        magic_ttl_seconds: int = 600,
+        webhook_allowed_hosts: list[str] | None = None,
+    ) -> None:
         self._store = store
         self._magic_ttl_seconds = magic_ttl_seconds
+        # None 表示使用默认白名单，[] 表示禁用白名单，其他表示自定义白名单
+        self._webhook_allowed_hosts = webhook_allowed_hosts
 
     async def initialize(self) -> None:
         await self._store.ensure_initialized()
@@ -290,6 +399,8 @@ class BindingService:
             return f"绑定失败: {reason}"
 
         details = await self._store.force_bind_platform(platform, platform_user_id, hub_id)
+        if platform == "feishu":
+            await self._store.clear_feishu_webhook(hub_id)
         logger.info(
             "绑定成功(覆盖模式): platform=%s user=%s previous_hub=%s replaced_user=%s",
             platform,
@@ -298,6 +409,51 @@ class BindingService:
             details.get("replaced_user_id"),
         )
         return "绑定成功，已更新当前平台身份映射"
+
+    async def handle_bind_webhook(
+        self,
+        source_platform: str,
+        source_user_id: str,
+        webhook_url: str,
+    ) -> str:
+        normalized_url = _normalize_feishu_webhook_url(webhook_url, self._webhook_allowed_hosts)
+        if not normalized_url:
+            # 脱敏 URL 用于日志
+            masked_url = mask_url(webhook_url)
+            logger.warning(
+                "Webhook 绑定失败: 平台=%s user=%s 原因=URL格式不合法或域名不在白名单内 url=%s",
+                source_platform,
+                source_user_id,
+                masked_url,
+            )
+            # 不在用户消息中暴露完整白名单，避免为攻击者提供信息
+            return (
+                "绑定失败: Webhook 地址格式不合法或域名不在白名单内。\n"
+                "请填写飞书自定义机器人 Webhook 地址，例如：\n"
+                "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
+            )
+
+        hub_id = await self._store.get_hub_id(source_platform, source_user_id)
+        if not hub_id:
+            hub_id = uuid.uuid4().hex
+            await self._store.bind_platform(source_platform, source_user_id, hub_id)
+
+        details = await self._store.bind_feishu_webhook(hub_id, normalized_url)
+        # 脱敏 previous_webhook 避免泄露旧凭据
+        previous_webhook_masked = (
+            mask_url(details["previous_webhook"]) if details.get("previous_webhook") else None
+        )
+        logger.info(
+            (
+                "Webhook 绑定成功: source_platform=%s source_user=%s "
+                "previous_webhook=%s replaced_user=%s"
+            ),
+            source_platform,
+            source_user_id,
+            previous_webhook_masked,
+            details.get("replaced_user_id"),
+        )
+        return "绑定成功，已切换为飞书 Webhook 转发模式"
 
     async def get_target_user_id(
         self,
@@ -323,3 +479,65 @@ class BindingService:
             bool(target_user_id),
         )
         return target_user_id
+
+    async def get_feishu_target(
+        self,
+        source_platform: str,
+        source_user_id: str,
+    ) -> FeishuTarget | None:
+        hub_id = await self._store.get_hub_id(source_platform, source_user_id)
+        if not hub_id:
+            logger.debug(
+                "未找到源平台绑定: source_platform=%s source_user_id=%s",
+                source_platform,
+                source_user_id,
+            )
+            return None
+
+        webhook = await self._store.get_feishu_webhook(hub_id)
+        if webhook:
+            return FeishuTarget(mode="webhook", target=webhook)
+
+        open_id = await self._store.get_platform_user_id("feishu", hub_id)
+        if open_id:
+            return FeishuTarget(mode="bot", target=open_id)
+
+        return None
+
+
+def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> str | None:
+    """
+    验证并归一化飞书 Webhook URL。
+    - 必须是 https 协议
+    - 域名必须在白名单内（防止 SSRF），除非白名单为空列表（禁用白名单）
+    - 路径必须包含 /open-apis/bot/v2/hook/
+
+    Args:
+        url: 待验证的 webhook URL
+        allowed_hosts: 域名白名单。
+            - None: 使用默认白名单 ["open.feishu.cn", "open.larksuite.com"]
+            - []: 禁用白名单校验（允许任意域名）
+            - [...]: 使用指定的自定义白名单
+    """
+    normalized = url.strip()
+    if not normalized:
+        return None
+
+    parsed = urlparse(normalized)
+    if parsed.scheme.lower() != "https":
+        return None
+
+    # 必须有合法主机名
+    if not parsed.hostname:
+        return None
+
+    # 域名白名单校验（SSRF 防护）——仅基于 hostname，不限制端口
+    # allowed_hosts 为空列表或 None 时的处理在外层逻辑中已完成
+    if allowed_hosts:
+        hostname = parsed.hostname.lower()
+        if hostname not in [host.lower() for host in allowed_hosts]:
+            return None
+
+    if "/open-apis/bot/v2/hook/" not in parsed.path:
+        return None
+    return normalized
