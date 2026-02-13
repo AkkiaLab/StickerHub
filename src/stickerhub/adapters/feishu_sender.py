@@ -1,9 +1,11 @@
 import json
 import logging
+from typing import Literal
 
 import httpx
 
 from stickerhub.core.models import StickerAsset
+from stickerhub.utils.url_masking import mask_url
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +20,15 @@ class FeishuSender:
         self._app_secret = app_secret
         self._base_url = "https://open.feishu.cn/open-apis"
 
-    async def send(self, asset: StickerAsset, target_mode: str, target: str) -> None:
+    async def send(
+        self, asset: StickerAsset, target_mode: Literal["bot", "webhook"], target: str
+    ) -> None:
+        # 避免在日志中暴露 webhook URL 中的敏感 token
+        safe_target = target if target_mode == "bot" else mask_url(target)
         logger.debug(
             "准备发送图片到飞书: mode=%s target=%s file=%s mime=%s size=%s",
             target_mode,
-            target,
+            safe_target,
             asset.file_name,
             asset.mime_type,
             len(asset.content),

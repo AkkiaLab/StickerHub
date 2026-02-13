@@ -122,6 +122,8 @@ def build_telegram_application(
         if not update.message or not update.effective_user:
             return
 
+        _cleanup_pending_webhook_requests(pending_webhook_requests)
+
         try:
             arg = context.args[0] if context.args else None
             telegram_user_id = str(update.effective_user.id)
@@ -149,6 +151,8 @@ def build_telegram_application(
         if not query:
             return
         await query.answer()
+
+        _cleanup_pending_webhook_requests(pending_webhook_requests)
 
         data = query.data or ""
         parsed = _parse_bind_mode_callback_data(data)
@@ -194,6 +198,7 @@ def build_telegram_application(
             return
 
         _cleanup_pending_requests(pending_pack_requests)
+        _cleanup_pending_webhook_requests(pending_webhook_requests)
 
         try:
             asset = await _extract_asset(update.message, context)
