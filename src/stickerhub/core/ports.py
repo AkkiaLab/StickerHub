@@ -9,5 +9,5 @@ class MediaNormalizer(Protocol):
 
 
 class TargetPlatformSender(Protocol):
-    async def send(self, asset: StickerAsset, target_user_id: str) -> None:
+    async def send(self, asset: StickerAsset, target_mode: str, target: str) -> None:
         """将素材发送到目标平台。"""

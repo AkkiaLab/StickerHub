@@ -18,10 +18,11 @@ class FeishuSender:
         self._app_secret = app_secret
         self._base_url = "https://open.feishu.cn/open-apis"
 
-    async def send(self, asset: StickerAsset, target_user_id: str) -> None:
+    async def send(self, asset: StickerAsset, target_mode: str, target: str) -> None:
         logger.debug(
-            "准备发送图片到飞书: receive_id=%s file=%s mime=%s size=%s",
-            target_user_id,
+            "准备发送图片到飞书: mode=%s target=%s file=%s mime=%s size=%s",
+            target_mode,
+            target,
             asset.file_name,
             asset.mime_type,
             len(asset.content),
@@ -29,7 +30,13 @@ class FeishuSender:
         async with httpx.AsyncClient(timeout=30.0) as client:
             token = await self._get_tenant_token(client)
             image_key = await self._upload_image(client, token, asset)
-            await self._send_image_message(client, token, image_key, target_user_id)
+            if target_mode == "bot":
+                await self._send_image_message(client, token, image_key, target)
+                return
+            if target_mode == "webhook":
+                await self._send_webhook_image(client, image_key=image_key, webhook_url=target)
+                return
+            raise RuntimeError(f"不支持的飞书目标类型: {target_mode}")
 
     async def send_text(
         self,
@@ -61,6 +68,18 @@ class FeishuSender:
             if response.status_code != 200 or payload.get("code") != 0:
                 raise RuntimeError(f"发送飞书文本消息失败: {payload}")
             logger.info("飞书文本消息已发送: receive_id=%s", receive_id)
+
+    async def send_webhook_text(self, text: str, webhook_url: str) -> None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await self._send_webhook_message(
+                client,
+                webhook_url=webhook_url,
+                message={
+                    "msg_type": "text",
+                    "content": {"text": text},
+                },
+            )
+        logger.info("飞书 webhook 文本消息已发送")
 
     async def _get_tenant_token(self, client: httpx.AsyncClient) -> str:
         response = await client.post(
@@ -129,3 +148,47 @@ class FeishuSender:
             raise RuntimeError(f"发送飞书消息失败: {payload}")
 
         logger.info("素材已发送到飞书: receive_id=%s", receive_id)
+
+    async def _send_webhook_image(
+        self,
+        client: httpx.AsyncClient,
+        image_key: str,
+        webhook_url: str,
+    ) -> None:
+        await self._send_webhook_message(
+            client,
+            webhook_url=webhook_url,
+            message={
+                "msg_type": "image",
+                "content": {"image_key": image_key},
+            },
+        )
+        logger.info("素材已发送到飞书 webhook")
+
+    async def _send_webhook_message(
+        self,
+        client: httpx.AsyncClient,
+        webhook_url: str,
+        message: dict[str, object],
+    ) -> None:
+        response = await client.post(
+            webhook_url,
+            headers={"Content-Type": "application/json"},
+            json=message,
+        )
+        try:
+            payload = response.json()
+        except json.JSONDecodeError:
+            payload = {"raw_body": response.text}
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                "发送飞书 webhook 消息失败: " f"status={response.status_code} payload={payload}"
+            )
+
+        status_code = payload.get("StatusCode")
+        code = payload.get("code")
+        status_ok = status_code in (None, 0, "0")
+        code_ok = code in (None, 0, "0")
+        if not status_ok or not code_ok:
+            raise RuntimeError(f"发送飞书 webhook 消息失败: {payload}")

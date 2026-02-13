@@ -22,7 +22,8 @@ StickerHub 是一个 Telegram 表情素材（Sticker/Image/GIF/Video）转换与
 
 配置飞书应用后，额外支持：
 
-- 双端绑定机制（`/bind`），将 Telegram 身份与飞书身份关联
+- `/bind` 双模式绑定（飞书机器人 / 飞书自定义机器人 Webhook）
+- 绑定模式二选一：切换后仅新配置生效
 - 单个贴纸自动转发到飞书
 - 整包发送时可选「📤 发送到飞书」，按每批 10 个并发发送
 - 飞书事件接收方式：**长连接（Long Connection）**，项目不对外开放 HTTP 端口
@@ -60,7 +61,7 @@ LOG_LEVEL=INFO
 说明：
 
 - `TELEGRAM_BOT_API_TOKEN`：必填，Telegram Bot API Token
-- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：可选，填写后启用飞书转发和 `/bind` 功能
+- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：可选，填写后启用飞书转发和 `/bind` 功能（包括 webhook 绑定所需的图片上传能力）
 - 飞书需在应用后台开启机器人收发消息权限(im:message)以及获取与上传图片或文件资源权限(im:resource) ![lark_permission.png](docs/lark_permission.png)
 - 飞书事件添加接收消息(im.message.receive_v1)并启用长连接事件能力。 ![lark_event.png](docs/lark_event.png)
 
@@ -91,12 +92,21 @@ docker compose -f docker-compose.local.yml up -d --build
 docker compose -f docker-compose.local.yml logs -f stickerhub
 ```
 
-## 绑定流程（需配置飞书）
-![20260213-050307.gif](../../Downloads/20260213-050307.gif)
-1. 在 Telegram 或飞书任一端发送：`/bind`
-2. 机器人返回一串魔法字符串
-3. 在另一端发送：`/bind <魔法字符串>`
-4. 绑定成功后，Telegram 发来的素材会路由到对应飞书身份
+## 绑定流程（需配置飞书 App）
+
+1. 在 Telegram 发送：`/bind`
+2. 选择绑定方式：
+   - `飞书机器人`：走魔法字符串绑定
+   - `飞书 Webhook`：输入飞书自定义机器人的 webhook 地址
+3. `飞书机器人`流程：
+   - Telegram 返回魔法字符串
+   - 在飞书机器人里发送 `/bind <魔法字符串>` 完成绑定
+4. `飞书 Webhook`流程：
+   - Telegram 提示输入 webhook 地址
+   - 输入后立即生效，后续素材通过 webhook 发送
+5. 两种绑定方式互斥，切换后仅新方式生效
+
+> 注意：未配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 时，不支持飞书 webhook 绑定与飞书转发。
 
 ## 已知限制
 

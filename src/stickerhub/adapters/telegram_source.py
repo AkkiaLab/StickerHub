@@ -34,12 +34,15 @@ logger = logging.getLogger(__name__)
 
 AssetHandler = Callable[[StickerAsset], Awaitable[None]]
 BindHandler = Callable[[str, str | None], Awaitable[str]]
+WebhookBindHandler = Callable[[str, str], Awaitable[str]]
 PackBatchMarkerHandler = Callable[[str, int, int, int, int, str], Awaitable[None]]
 NormalizeHandler = Callable[[StickerAsset], Awaitable[StickerAsset]]
 
 PACK_CALLBACK_PREFIX = "send_pack:"
 STOP_PACK_CALLBACK_PREFIX = "stop_pack:"
+BIND_MODE_CALLBACK_PREFIX = "bind_mode:"
 PACK_REQUEST_TTL_SECONDS = 15 * 60
+WEBHOOK_BIND_REQUEST_TTL_SECONDS = 10 * 60
 PACK_BATCH_SIZE = 10
 
 
@@ -64,6 +67,12 @@ class RunningStickerPackTask:
     cancel_requested: bool = False
 
 
+@dataclass(slots=True)
+class PendingWebhookBindRequest:
+    telegram_user_id: str
+    created_at: int
+
+
 def build_telegram_usage_text(feishu_enabled: bool = True) -> str:
     lines = [
         "StickerHub 使用说明：",
@@ -81,7 +90,7 @@ def build_telegram_usage_text(feishu_enabled: bool = True) -> str:
         ]
     )
     if feishu_enabled:
-        lines.append("/bind [魔法字符串]")
+        lines.append("/bind（选择飞书机器人或 webhook 绑定）")
     return "\n".join(lines)
 
 
@@ -91,7 +100,7 @@ def get_telegram_bot_commands(feishu_enabled: bool = True) -> list[BotCommand]:
         BotCommand("start", "开始使用并查看说明"),
     ]
     if feishu_enabled:
-        commands.insert(0, BotCommand("bind", "绑定账号：/bind 或 /bind <code>"))
+        commands.insert(0, BotCommand("bind", "绑定飞书：/bind 或 /bind <code>"))
     return commands
 
 
@@ -99,6 +108,7 @@ def build_telegram_application(
     token: str,
     on_asset: AssetHandler,
     on_bind: BindHandler,
+    on_bind_webhook: WebhookBindHandler | None = None,
     on_pack_batch_marker: PackBatchMarkerHandler | None = None,
     on_normalize: NormalizeHandler | None = None,
     feishu_enabled: bool = True,
@@ -106,6 +116,7 @@ def build_telegram_application(
     application = Application.builder().token(token).build()
     pending_pack_requests: dict[str, PendingStickerPackRequest] = {}
     running_pack_tasks: dict[str, RunningStickerPackTask] = {}
+    pending_webhook_requests: dict[str, PendingWebhookBindRequest] = {}
 
     async def handle_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.effective_user:
@@ -113,11 +124,64 @@ def build_telegram_application(
 
         try:
             arg = context.args[0] if context.args else None
-            reply = await on_bind(str(update.effective_user.id), arg)
-            await update.message.reply_text(reply)
+            telegram_user_id = str(update.effective_user.id)
+            if arg:
+                reply = await on_bind(telegram_user_id, arg)
+                await update.message.reply_text(reply)
+                return
+
+            if not feishu_enabled or on_bind_webhook is None:
+                reply = await on_bind(telegram_user_id, None)
+                await update.message.reply_text(reply)
+                return
+
+            await update.message.reply_text(
+                "请选择飞书绑定方式：",
+                reply_markup=_build_bind_mode_keyboard(telegram_user_id),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("处理 Telegram /bind 失败")
             await update.message.reply_text(f"绑定失败: {exc}")
+
+    async def handle_bind_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        data = query.data or ""
+        parsed = _parse_bind_mode_callback_data(data)
+        if not parsed:
+            return
+
+        mode, owner_telegram_user_id = parsed
+        effective_user = update.effective_user
+        if not effective_user or str(effective_user.id) != owner_telegram_user_id:
+            await query.answer("仅发起绑定的用户可以点击该按钮", show_alert=True)
+            return
+
+        if mode == "bot":
+            reply = await on_bind(owner_telegram_user_id, None)
+            await query.edit_message_text(
+                f"{reply}\n\n请在飞书机器人里发送上面的 /bind 命令完成绑定。"
+            )
+            return
+
+        if mode == "webhook":
+            if on_bind_webhook is None:
+                await query.answer("当前未启用 webhook 绑定", show_alert=True)
+                return
+
+            pending_webhook_requests[owner_telegram_user_id] = PendingWebhookBindRequest(
+                telegram_user_id=owner_telegram_user_id,
+                created_at=int(time.time()),
+            )
+            await query.edit_message_text(
+                "请直接发送飞书自定义机器人的 Webhook 地址。\n"
+                "示例：\n"
+                "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
+            )
 
     async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -310,6 +374,31 @@ def build_telegram_application(
         del context
         if not update.message:
             return
+
+        _cleanup_pending_webhook_requests(pending_webhook_requests)
+
+        if update.effective_user:
+            telegram_user_id = str(update.effective_user.id)
+            pending = pending_webhook_requests.get(telegram_user_id)
+            if pending:
+                if not update.message.text:
+                    await update.message.reply_text(
+                        "正在等待你输入飞书 Webhook 地址，请发送文本链接，或重新输入 /bind。"
+                    )
+                    return
+
+                pending_webhook_requests.pop(telegram_user_id, None)
+                try:
+                    if on_bind_webhook is None:
+                        await update.message.reply_text("当前未启用 webhook 绑定")
+                        return
+                    reply = await on_bind_webhook(telegram_user_id, update.message.text.strip())
+                    await update.message.reply_text(reply)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("处理 Telegram webhook 绑定失败")
+                    await update.message.reply_text(f"绑定失败: {exc}")
+                return
+
         await update.message.reply_text(
             "暂不支持该消息类型。\n\n" + build_telegram_usage_text(feishu_enabled)
         )
@@ -327,6 +416,12 @@ def build_telegram_application(
 
     if feishu_enabled:
         application.add_handler(CommandHandler("bind", handle_bind))
+        application.add_handler(
+            CallbackQueryHandler(
+                handle_bind_mode_callback,
+                pattern=rf"^{BIND_MODE_CALLBACK_PREFIX}",
+            )
+        )
     application.add_handler(CommandHandler("help", handle_help))
     application.add_handler(CommandHandler("start", handle_help))
     application.add_handler(
@@ -533,6 +628,23 @@ def _build_stop_keyboard(task_id: str) -> InlineKeyboardMarkup:
                     text="停止发送",
                     callback_data=f"{STOP_PACK_CALLBACK_PREFIX}{task_id}",
                 )
+            ]
+        ]
+    )
+
+
+def _build_bind_mode_keyboard(telegram_user_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="飞书机器人",
+                    callback_data=f"{BIND_MODE_CALLBACK_PREFIX}bot:{telegram_user_id}",
+                ),
+                InlineKeyboardButton(
+                    text="飞书 Webhook",
+                    callback_data=f"{BIND_MODE_CALLBACK_PREFIX}webhook:{telegram_user_id}",
+                ),
             ]
         ]
     )
@@ -798,6 +910,19 @@ def _cleanup_pending_requests(pending_pack_requests: dict[str, PendingStickerPac
         pending_pack_requests.pop(token, None)
 
 
+def _cleanup_pending_webhook_requests(
+    pending_webhook_requests: dict[str, PendingWebhookBindRequest],
+) -> None:
+    now = int(time.time())
+    expired_users = [
+        user_id
+        for user_id, req in pending_webhook_requests.items()
+        if now - req.created_at > WEBHOOK_BIND_REQUEST_TTL_SECONDS
+    ]
+    for user_id in expired_users:
+        pending_webhook_requests.pop(user_id, None)
+
+
 def _safe_pack_name(set_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", set_name)
 
@@ -814,6 +939,21 @@ def _parse_pack_callback_data(data: str) -> tuple[str, str] | None:
     if mode not in {"feishu", "zip", "photos"}:
         return None
     return mode, token
+
+
+def _parse_bind_mode_callback_data(data: str) -> tuple[str, str] | None:
+    if not data.startswith(BIND_MODE_CALLBACK_PREFIX):
+        return None
+    rest = data[len(BIND_MODE_CALLBACK_PREFIX) :]
+    parts = rest.split(":", 1)
+    if len(parts) != 2:
+        return None
+    mode, telegram_user_id = parts
+    if mode not in {"bot", "webhook"}:
+        return None
+    if not telegram_user_id:
+        return None
+    return mode, telegram_user_id
 
 
 async def _identity_normalize(asset: StickerAsset) -> StickerAsset:

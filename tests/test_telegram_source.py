@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 from stickerhub.adapters.telegram_source import (
+    BIND_MODE_CALLBACK_PREFIX,
     PACK_CALLBACK_PREFIX,
     PendingStickerPackRequest,
     RunningStickerPackTask,
@@ -10,6 +11,7 @@ from stickerhub.adapters.telegram_source import (
     _deduplicate_filename,
     _detect_sticker_mime,
     _has_running_task_for_user,
+    _parse_bind_mode_callback_data,
     _parse_pack_callback_data,
     _send_single_sticker_reply,
 )
@@ -109,6 +111,25 @@ class TestParsePackCallbackData:
         """token 本身包含冒号时应正确分割。"""
         result = _parse_pack_callback_data(f"{PACK_CALLBACK_PREFIX}zip:token:with:colons")
         assert result == ("zip", "token:with:colons")
+
+
+class TestParseBindModeCallbackData:
+    def test_valid_bot_mode(self) -> None:
+        result = _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}bot:123")
+        assert result == ("bot", "123")
+
+    def test_valid_webhook_mode(self) -> None:
+        result = _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}webhook:456")
+        assert result == ("webhook", "456")
+
+    def test_invalid_prefix(self) -> None:
+        assert _parse_bind_mode_callback_data("wrong:bot:123") is None
+
+    def test_invalid_mode(self) -> None:
+        assert _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}unknown:123") is None
+
+    def test_missing_user_id(self) -> None:
+        assert _parse_bind_mode_callback_data(f"{BIND_MODE_CALLBACK_PREFIX}bot:") is None
 
 
 class TestDeduplicateFilename:
