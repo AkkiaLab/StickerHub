@@ -428,10 +428,9 @@ class BindingService:
                 source_user_id,
                 masked_url,
             )
-            allowed_hosts_str = ", ".join(self._webhook_allowed_hosts)
+            # 不在用户消息中暴露完整白名单，避免为攻击者提供信息
             return (
                 "绑定失败: Webhook 地址格式不合法或域名不在白名单内。\n"
-                f"允许的域名：{allowed_hosts_str}\n"
                 "请填写飞书自定义机器人 Webhook 地址，例如：\n"
                 "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
             )

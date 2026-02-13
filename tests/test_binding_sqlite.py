@@ -154,12 +154,12 @@ async def _bind_webhook_domain_whitelist(db_path: str) -> None:
     # 不在白名单的域名应被拒绝（防止 SSRF）
     blocked_url = "https://evil.com/open-apis/bot/v2/hook/malicious"
     reply = await service.handle_bind_webhook("telegram", "tg_whitelist_block", blocked_url)
-    assert "白名单" in reply or "格式不合法" in reply
+    assert "白名单" in reply
 
     # open.larksuite.com 不在自定义白名单中，应被拒绝
     larksuite_url = "https://open.larksuite.com/open-apis/bot/v2/hook/token"
     reply = await service.handle_bind_webhook("telegram", "tg_whitelist_lark", larksuite_url)
-    assert "白名单" in reply or "格式不合法" in reply
+    assert "白名单" in reply
 
 
 def test_bind_flow_with_sqlite(tmp_path) -> None:

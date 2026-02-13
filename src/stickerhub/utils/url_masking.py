@@ -23,5 +23,6 @@ def mask_url(url: str) -> str:
         else:
             masked_path = parsed.path
         return f"{parsed.scheme}://{parsed.netloc}{masked_path}"
-    except Exception:  # noqa: BLE001
+    except (ValueError, TypeError, AttributeError):
+        # urlparse 可能抛出 ValueError，或传入 None 导致 TypeError/AttributeError
         return "[url_masked]"
