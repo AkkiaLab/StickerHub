@@ -441,9 +441,7 @@ class BindingService:
         details = await self._store.bind_feishu_webhook(hub_id, normalized_url)
         # 脱敏 previous_webhook 避免泄露旧凭据
         previous_webhook_masked = (
-            mask_url(details["previous_webhook"])
-            if details.get("previous_webhook")
-            else None
+            mask_url(details["previous_webhook"]) if details.get("previous_webhook") else None
         )
         logger.info(
             (
@@ -513,7 +511,7 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> 
     - 必须是 https 协议
     - 域名必须在白名单内（防止 SSRF），除非白名单为空列表（禁用白名单）
     - 路径必须包含 /open-apis/bot/v2/hook/
-    
+
     Args:
         url: 待验证的 webhook URL
         allowed_hosts: 域名白名单。
@@ -528,7 +526,7 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> 
     parsed = urlparse(normalized)
     if parsed.scheme.lower() != "https":
         return None
-    
+
     # 必须有合法主机名
     if not parsed.hostname:
         return None

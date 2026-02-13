@@ -17,7 +17,7 @@ def mask_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
-        
+
         # 仅在解析结果有明确的协议和主机名时才返回拼接后的 URL
         if not parsed.scheme or not parsed.hostname:
             return "[url_masked]"
