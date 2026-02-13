@@ -146,9 +146,14 @@ async def _bind_webhook_domain_whitelist(db_path: str) -> None:
     )
     await service.initialize()
 
-    # 合法域名应通过
+    # 合法域名应通过（不限制端口）
     valid_url = "https://open.feishu.cn/open-apis/bot/v2/hook/valid_token"
     reply = await service.handle_bind_webhook("telegram", "tg_whitelist_ok", valid_url)
+    assert "绑定成功" in reply
+
+    # 合法域名 + 自定义端口也应通过
+    valid_url_with_port = "https://open.feishu.cn:8443/open-apis/bot/v2/hook/token_with_port"
+    reply = await service.handle_bind_webhook("telegram", "tg_whitelist_port", valid_url_with_port)
     assert "绑定成功" in reply
 
     # 不在白名单的域名应被拒绝（防止 SSRF）
@@ -160,6 +165,24 @@ async def _bind_webhook_domain_whitelist(db_path: str) -> None:
     larksuite_url = "https://open.larksuite.com/open-apis/bot/v2/hook/token"
     reply = await service.handle_bind_webhook("telegram", "tg_whitelist_lark", larksuite_url)
     assert "白名单" in reply
+
+
+async def _bind_webhook_whitelist_disabled(db_path: str) -> None:
+    """测试禁用白名单校验"""
+    store = BindingStore(db_path)
+    # 空列表表示禁用白名单
+    service = BindingService(store=store, magic_ttl_seconds=600, webhook_allowed_hosts=[])
+    await service.initialize()
+
+    # 任意域名都应通过（白名单已禁用）
+    custom_url = "https://custom.domain.com/open-apis/bot/v2/hook/custom_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_no_whitelist", custom_url)
+    assert "绑定成功" in reply
+
+    # 即使是非常规域名也应通过
+    another_url = "https://example.org/open-apis/bot/v2/hook/another_token"
+    reply = await service.handle_bind_webhook("telegram", "tg_no_whitelist2", another_url)
+    assert "绑定成功" in reply
 
 
 def test_bind_flow_with_sqlite(tmp_path) -> None:
@@ -205,3 +228,8 @@ def test_bind_webhook_invalid_url(tmp_path) -> None:
 def test_bind_webhook_domain_whitelist(tmp_path) -> None:
     db_path = tmp_path / "binding.db"
     asyncio.run(_bind_webhook_domain_whitelist(str(db_path)))
+
+
+def test_bind_webhook_whitelist_disabled(tmp_path) -> None:
+    db_path = tmp_path / "binding.db"
+    asyncio.run(_bind_webhook_whitelist_disabled(str(db_path)))

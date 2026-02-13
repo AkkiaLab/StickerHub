@@ -27,7 +27,7 @@ async def async_main() -> None:
     binding_service = BindingService(
         store=BindingStore(settings.binding_db_path),
         magic_ttl_seconds=settings.bind_magic_ttl_seconds,
-        webhook_allowed_hosts=settings.feishu_webhook_allowed_hosts,
+        webhook_allowed_hosts=settings.get_webhook_allowed_hosts(),
     )
     await binding_service.initialize()
 

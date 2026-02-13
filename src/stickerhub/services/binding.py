@@ -354,10 +354,8 @@ class BindingService:
     ) -> None:
         self._store = store
         self._magic_ttl_seconds = magic_ttl_seconds
-        self._webhook_allowed_hosts = webhook_allowed_hosts or [
-            "open.feishu.cn",
-            "open.larksuite.com",
-        ]
+        # None 表示使用默认白名单，[] 表示禁用白名单，其他表示自定义白名单
+        self._webhook_allowed_hosts = webhook_allowed_hosts
 
     async def initialize(self) -> None:
         await self._store.ensure_initialized()
@@ -441,6 +439,12 @@ class BindingService:
             await self._store.bind_platform(source_platform, source_user_id, hub_id)
 
         details = await self._store.bind_feishu_webhook(hub_id, normalized_url)
+        # 脱敏 previous_webhook 避免泄露旧凭据
+        previous_webhook_masked = (
+            mask_url(details["previous_webhook"])
+            if details.get("previous_webhook")
+            else None
+        )
         logger.info(
             (
                 "Webhook 绑定成功: source_platform=%s source_user=%s "
@@ -448,7 +452,7 @@ class BindingService:
             ),
             source_platform,
             source_user_id,
-            details.get("previous_webhook"),
+            previous_webhook_masked,
             details.get("replaced_user_id"),
         )
         return "绑定成功，已切换为飞书 Webhook 转发模式"
@@ -503,12 +507,16 @@ class BindingService:
         return None
 
 
-def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str]) -> str | None:
+def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> str | None:
     """
     验证并归一化飞书 Webhook URL。
     - 必须是 https 协议
-    - 域名必须在白名单内（防止 SSRF）
+    - 域名必须在白名单内（防止 SSRF），除非 allowed_hosts 为空列表（禁用白名单）
     - 路径必须包含 /open-apis/bot/v2/hook/
+    
+    Args:
+        url: 待验证的 webhook URL
+        allowed_hosts: 域名白名单。None 表示禁用白名单，[] 也表示禁用白名单，其他表示使用指定白名单
     """
     normalized = url.strip()
     if not normalized:
@@ -517,12 +525,17 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str]) -> str | N
     parsed = urlparse(normalized)
     if parsed.scheme.lower() != "https":
         return None
-    if not parsed.netloc:
+    
+    # 必须有合法主机名
+    if not parsed.hostname:
         return None
 
-    # 域名白名单校验（SSRF 防护）
-    if parsed.netloc.lower() not in [host.lower() for host in allowed_hosts]:
-        return None
+    # 域名白名单校验（SSRF 防护）——仅基于 hostname，不限制端口
+    # allowed_hosts 为空列表时禁用白名单校验
+    if allowed_hosts is not None and len(allowed_hosts) > 0:
+        hostname = parsed.hostname.lower()
+        if hostname not in [host.lower() for host in allowed_hosts]:
+            return None
 
     if "/open-apis/bot/v2/hook/" not in parsed.path:
         return None

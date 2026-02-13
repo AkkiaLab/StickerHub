@@ -56,8 +56,10 @@ FEISHU_APP_SECRET=
 BINDING_DB_PATH=data/stickerhub.db
 BIND_MAGIC_TTL_SECONDS=600
 
-# 飞书 Webhook 域名白名单（逗号分隔，留空则使用默认值）
-# 默认：open.feishu.cn,open.larksuite.com
+# 飞书 Webhook 域名白名单（JSON 格式的字符串数组）
+# 不设置：使用默认白名单 ["open.feishu.cn","open.larksuite.com"]
+# 设为 []：禁用白名单校验（允许任意域名，请谨慎使用）
+# 设为自定义列表：如 ["open.feishu.cn","custom.domain.com"]
 FEISHU_WEBHOOK_ALLOWED_HOSTS=
 
 LOG_LEVEL=INFO
@@ -67,7 +69,10 @@ LOG_LEVEL=INFO
 
 - `TELEGRAM_BOT_API_TOKEN`：必填，Telegram Bot API Token
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：可选，填写后启用飞书转发和 `/bind` 功能（包括 webhook 绑定所需的图片上传能力）
-- `FEISHU_WEBHOOK_ALLOWED_HOSTS`：飞书 Webhook 域名白名单（防止 SSRF 攻击），默认仅允许 `open.feishu.cn` 和 `open.larksuite.com`
+- `FEISHU_WEBHOOK_ALLOWED_HOSTS`：飞书 Webhook 域名白名单（JSON 格式，防止 SSRF 攻击）
+  - 不设置：使用默认白名单 `["open.feishu.cn", "open.larksuite.com"]`
+  - 设为 `[]`：禁用白名单校验（允许任意域名，**请谨慎使用**）
+  - 设为自定义列表：如 `["open.feishu.cn", "custom.domain.com"]`
 - 飞书需在应用后台开启机器人收发消息权限(im:message)以及获取与上传图片或文件资源权限(im:resource) ![lark_permission.png](docs/lark_permission.png)
 - 飞书事件添加接收消息(im.message.receive_v1)并启用长连接事件能力。 ![lark_event.png](docs/lark_event.png)
 
