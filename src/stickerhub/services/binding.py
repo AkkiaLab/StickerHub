@@ -511,12 +511,15 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> 
     """
     验证并归一化飞书 Webhook URL。
     - 必须是 https 协议
-    - 域名必须在白名单内（防止 SSRF），除非 allowed_hosts 为空列表（禁用白名单）
+    - 域名必须在白名单内（防止 SSRF），除非白名单为空列表（禁用白名单）
     - 路径必须包含 /open-apis/bot/v2/hook/
     
     Args:
         url: 待验证的 webhook URL
-        allowed_hosts: 域名白名单。None 表示禁用白名单，[] 也表示禁用白名单，其他表示使用指定白名单
+        allowed_hosts: 域名白名单。
+            - None: 使用默认白名单 ["open.feishu.cn", "open.larksuite.com"]
+            - []: 禁用白名单校验（允许任意域名）
+            - [...]: 使用指定的自定义白名单
     """
     normalized = url.strip()
     if not normalized:
@@ -531,8 +534,8 @@ def _normalize_feishu_webhook_url(url: str, allowed_hosts: list[str] | None) -> 
         return None
 
     # 域名白名单校验（SSRF 防护）——仅基于 hostname，不限制端口
-    # allowed_hosts 为空列表时禁用白名单校验
-    if allowed_hosts is not None and len(allowed_hosts) > 0:
+    # allowed_hosts 为空列表或 None 时的处理在外层逻辑中已完成
+    if allowed_hosts:
         hostname = parsed.hostname.lower()
         if hostname not in [host.lower() for host in allowed_hosts]:
             return None
